@@ -1,0 +1,26 @@
+# Mail Intelligence runtime — slim image. Python deps bootstrap into a named volume on first start.
+# Application source is bind-mounted at /ragflow (live fork edits, no image rebuild).
+# Rebuild this image only when system packages change — NOT on pyproject.toml edits.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/ragflow-venv
+ENV PATH="/opt/ragflow-venv/bin:${PATH}"
+ENV PYTHONPATH=/ragflow
+ENV UV_PROJECT_ENVIRONMENT=/opt/ragflow-venv
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget git nginx \
+    libglib2.0-0 libgl1 libgdiplus libjemalloc-dev \
+    pkg-config build-essential libpython3-dev libicu-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY docker/scripts/mail-intel-entrypoint.sh /usr/local/bin/mail-intel-entrypoint.sh
+RUN chmod +x /usr/local/bin/mail-intel-entrypoint.sh
+
+WORKDIR /ragflow
+EXPOSE 80 9380
+ENTRYPOINT ["/usr/local/bin/mail-intel-entrypoint.sh"]

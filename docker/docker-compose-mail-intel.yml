@@ -1,0 +1,148 @@
+# Mail Intelligence — live-code Docker stack (Infinity, segmented networks, FIDO2)
+#
+# Build runtime image ONCE (Python deps). Your fork is bind-mounted — no rebuild on code edits.
+# Agent/prompt changes in the UI → MySQL only (no container rebuild).
+# Python/component changes → docker compose restart ragflow-mail-intel
+# Frontend UI changes → cd web && npm run build, then restart ragflow-mail-intel
+#
+# Setup:
+#   cp .env.mail-intel.example .env.mail-intel
+#   cp ../config/mail_intel.env.example ../config/mail_intel.env
+#   cd ../web && npm install && npm run build   # once (or after web changes)
+#   docker compose -f docker-compose-mail-intel.yml --env-file .env --env-file .env.mail-intel up -d --build
+#   export RAGFLOW_API_EMAIL=... RAGFLOW_API_PASSWORD=...   # shell only — never in env files
+#   docker compose -f docker-compose-mail-intel.yml --env-file .env --env-file .env.mail-intel --profile init run --rm mail-intel-deploy
+#
+# Browser: http://localhost/agent/<MAIL_INTEL_AGENT_ID>/explore
+
+include:
+  - ./docker-compose-base.yml
+
+networks:
+  edge:
+    driver: bridge
+  app:
+    driver: bridge
+    internal: true
+  data:
+    driver: bridge
+    internal: true
+
+volumes:
+  mail_intel_hardware_auth:
+  mail_intel_privacy_vault:
+  mail_intel_local_vault:
+  mail_intel_venv:
+  mail_intel_uv_cache:
+
+services:
+  mysql:
+    networks: [data]
+    ports: !reset []
+
+  redis:
+    networks: [data]
+    ports: !reset []
+
+  minio:
+    networks: [data]
+    ports: !reset []
+
+  infinity:
+    networks: [data]
+    ports: !reset []
+
+  ragflow-cpu:
+    profiles: ["never"]
+  ragflow-gpu:
+    profiles: ["never"]
+
+  ragflow-mail-intel:
+    container_name: ragflow-mail-intel
+    image: ragflow-mail-intel-runtime:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mail-intel-runtime
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+      infinity:
+        condition: service_healthy
+    ports:
+      - "${SVR_WEB_HTTP_PORT:-80}:80"
+    expose:
+      - "9380"
+    networks:
+      - edge
+      - app
+      - data
+    volumes:
+      # Live fork — agents/prompts/components edit on host, restart to pick up Python
+      - ..:/ragflow:rw
+      - ./scripts/mail-intel-entrypoint.sh:/usr/local/bin/mail-intel-entrypoint.sh:ro
+      - mail_intel_venv:/opt/ragflow-venv
+      - mail_intel_uv_cache:/root/.cache/uv
+      - ./ragflow-logs:/ragflow/logs
+      - mail_intel_hardware_auth:/ragflow/config/hardware_auth
+      - mail_intel_privacy_vault:/ragflow/config/privacy_vault
+      - mail_intel_local_vault:/ragflow/config/local_vault
+      - ${OBSIDIAN_VAULT_PATH:?Set OBSIDIAN_VAULT_PATH in .env.mail-intel}:/vault:rw
+    env_file:
+      - .env
+    environment:
+      DOC_ENGINE: infinity
+      API_PROXY_SCHEME: python
+      OBSIDIAN_VAULT_PATH: /vault
+      OBSIDIAN_MAIL_INTEL_FOLDER: ${OBSIDIAN_MAIL_INTEL_FOLDER:-Mail Intel}
+      MAIL_INTEL_RP_ID: ${MAIL_INTEL_RP_ID:-localhost}
+      MAIL_INTEL_RP_ORIGIN: ${MAIL_INTEL_RP_ORIGIN:-http://localhost}
+      MAIL_INTEL_RP_NAME: ${MAIL_INTEL_RP_NAME:-RAGFlow Mail Intel}
+      MAIL_INTEL_HARDWARE_STORE: /ragflow/config/hardware_auth
+      MAIL_INTEL_HARDWARE_TOKEN_TTL_SEC: ${MAIL_INTEL_HARDWARE_TOKEN_TTL_SEC:-86400}
+      MAIL_INTEL_HARDWARE_STORE_KEY: ${MAIL_INTEL_HARDWARE_STORE_KEY:-}
+      MAIL_INTEL_VAULT_DIR: /ragflow/config/privacy_vault
+      MAIL_INTEL_LOCAL_VAULT: /ragflow/config/local_vault
+      MAIL_INTEL_SEALED_DIR: /ragflow/agent/prompts/sealed/mail_intel
+      MAIL_INTEL_OBSIDIAN_2FA: ${MAIL_INTEL_OBSIDIAN_2FA:-true}
+      MAIL_INTEL_VAULT_MASTER: ${MAIL_INTEL_VAULT_MASTER:-}
+      # Export MAIL_INTEL_VAULT_MASTER in host shell before compose up — never commit
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9380/api/v1/system/ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 2400s
+
+  mail-intel-deploy:
+    profiles: ["init"]
+    image: ragflow-mail-intel-runtime:latest
+    depends_on:
+      ragflow-mail-intel:
+        condition: service_healthy
+    networks:
+      - app
+      - data
+    volumes:
+      - ..:/ragflow:rw
+      - mail_intel_venv:/opt/ragflow-venv
+      - mail_intel_uv_cache:/root/.cache/uv
+      - ./scripts/mail-intel-deploy.sh:/ragflow/docker/scripts/mail-intel-deploy.sh:ro
+    env_file:
+      - .env
+    environment:
+      RAGFLOW_API_BASE: http://ragflow-mail-intel:9380
+      MAIL_INTEL_AGENT_ID: ${MAIL_INTEL_AGENT_ID:-}
+      # Login credentials must be exported in the host shell before this job runs (never in .env files).
+      RAGFLOW_API_EMAIL: ${RAGFLOW_API_EMAIL:-}
+      RAGFLOW_API_PASSWORD: ${RAGFLOW_API_PASSWORD:-}
+      PYTHONPATH: /ragflow
+      PATH: /opt/ragflow-venv/bin:/usr/local/bin:/usr/bin:/bin
+    entrypoint: ["/bin/bash", "/ragflow/docker/scripts/mail-intel-deploy.sh"]
+    restart: "no"
